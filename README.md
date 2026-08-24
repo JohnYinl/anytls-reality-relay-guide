@@ -156,3 +156,30 @@ ExecStart=/usr/bin/socat TCP4-LISTEN:8443,fork,reuseaddr TCP4:<落地机IP>:8443
 ---
 
 *基于 2026-08-24 一次真实搭建整理。协议生态变化快，动工前先验证时效性。*
+
+## 致谢与参考
+
+本教程站在这两篇文章、这些社区讨论和这些文档的肩膀上，特此致谢 🙏
+
+**架构参考**
+- [LINUX DO：小丸子《自建家宽节点+中转站教程》](https://linux.do/t/topic/2086346)——中转+落地架构的原型参考
+- [LINUX DO：DMIT + 3x-ui + Reality + 自有域名实战记录](https://linux.do/t/topic/2625350)——域名+证书+回退站路线的互证
+
+**官方文档**
+- [XTLS/REALITY 官方 README](https://github.com/XTLS/REALITY)（dest 最低标准与加分项的权威出处）
+- [Xray 配置文档](https://xtls.github.io/config/) / [sing-box AnyTLS 入站文档](https://sing-box.sagernet.org/configuration/inbound/anytls/) / [mihomo wiki](https://wiki.metacubex.one/)
+- [anytls-go 协议原文](https://github.com/anytls/anytls-go/blob/main/docs/protocol.md) 与 [AnyTLS Wiki](https://anytls.wiki/docs/server/)（padding 下发机制的设计说明）
+- [Xray/mihomo Reality 配置教程（argsment）](https://core-tutorial.argsment.com/zh/xray/reality)
+
+**关键社区病例**
+- [LINUX DO：3x-ui Reality 节点 timeout——Microsoft 伪装站证书过大事件](https://linux.do/t/topic/2571392)（本教程「坑 2」的同案首发记录，感谢楼主抓出 8273 字节这个关键证据）
+- [LINUX DO：搬瓦工 IP 一月被墙两次求助帖](https://linux.do/t/topic/2757894)（dest 选型的集体智慧：勿用谷歌系/CF 套壳域名，「偷自己」多人多年实证）
+- [LINUX DO：x-ui Reality 在 Shadowrocket 正常、Clash 系全灭](https://linux.do/t/topic/2692871)（minClientVer 门禁的实战记录）
+- [idcflare：高位端口批判](https://idcflare.com/t/topic/76439)（端口与伪装的讨论）
+- [V2EX：近日 AnyTLS 流量已被识别或通报](https://www.v2ex.com/t/1214944)（2026-05 指纹识别事件）
+
+**上游 issue（兼容性问题的一手证据）**
+- [mihomo#2967](https://github.com/MetaCubeX/mihomo/issues/2967)（ClientVer 硬编码与 wontfix）/ [mihomo#3042](https://github.com/MetaCubeX/mihomo/issues/3042) / [Xray-core#6477](https://github.com/XTLS/Xray-core/issues/6477)（版本兼容事件三方视角）
+- [Xray-core Discussions #2256](https://github.com/XTLS/Xray-core/discussions/2256)（RPRX 本人的 dest 选型指导）/ [#2308](https://github.com/XTLS/Xray-core/discussions/2308)（dest 密钥曲线导致握手失败）
+- [sing-box#4023](https://github.com/SagerNet/sing-box/issues/4023)（sing-box Reality 服务端兼容性病例）
+
