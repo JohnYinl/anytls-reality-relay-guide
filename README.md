@@ -1,109 +1,142 @@
-# 自建双协议翻墙链实战教程：AnyTLS + Reality 中转落地架构（2026-08 版）
+# 手把手自建翻墙链：AnyTLS + Reality 双协议·中转+落地架构（2026-08 版）
 
-> 一天从零搭完一条「中转机负责快、落地机负责身份干净」的双协议链路，并把当天踩的所有坑如实记录。
-> 面向有一定动手能力的新手。所有 IP、域名、密钥均为占位符，替换成你自己的即可。
+> 跟着做就能搭出一条「快 + 身份干净」的私人链路。每一步都有三样东西：**这步在干什么 → 复制什么命令 → 看到什么算成功**。
+> 全文所有 IP、域名、密码、密钥都是占位符（如 `1.2.3.4`、`example.com`、`【密码】`），替换成你自己的。
+> 适合：会用复制粘贴的新手。不适合：想一键脚本三秒搞定的（这套追求的是知其所以然 + 长期稳定）。
 
-## 这套架构是什么
+---
+
+## 〇、你将得到什么 & 为什么这样设计
 
 ```
-你的设备 → 中转机（优化线路 VPS，负责快）→ 落地机（家宽 VPS，负责 IP 干净）→ 目标网站
-           ├ AnyTLS 线：中转:443 → 落地 nginx:8444 按 SNI 分流 → sing-box（本机 8445）
-           │             探测者 → 落地 nginx 回退站（本机 9443，真实网站）
-           └ Reality 线：中转:8443 → Xray:8443 → dest 指向自己的回退站（「偷自己」）
+你的手机/电脑 → 中转机（优化线路 VPS，只负责快）→ 落地机（住宅 IP VPS，只负责身份干净）→ 目标网站
 ```
 
-- **双协议异构**：AnyTLS 和 VLESS+Reality 走同一个落地出口 IP，任何一条被针对，另一条顶上，切换时出口 IP 不变（对 AI 风控无感）
-- **中转只做哑转发**（socat），不跑代理协议，换机/换 IP 成本为零
-- **自有域名 + 真证书 + 真实回退站**：探测者看到的证书、SNI、网站内容三位一体全是你的站，零借用痕迹
+**为什么是两台机器**：优化线路 VPS 速度快但 IP 是机房段（AI 网站风控不待见）；住宅 IP VPS 身份干净但回国线路差。让两台各管一头，快和干净就都有了。
 
-## 为什么这样设计
+**为什么是双协议**：AnyTLS 和 VLESS+Reality 两条线同时跑，同一个出口 IP。任何一条被针对，一键切另一条，AI 风控无感。
 
-1. **快和干净是两件事**：优化线路 VPS（如 DMIT 这类 CN2 GIA 商家）速度快但 IP 是机房段；住宅 IP VPS 身份干净但回国线路差。拆开各管一头
-2. **2026 年的协议环境**：AnyTLS 满血（真证书+自有域名+回退站）与 VLESS+Reality+Vision 是 T0 组合；单一协议被针对性识别时双协议可互为备线
-3. **回退站不是摆设**：AnyTLS 服务端没有原生 fallback，必须靠 nginx stream 按 SNI 分流——客户端进 sing-box，探测者进真实网站
+**为什么要自有域名 + 真实网站（回退站）**：防火墙会「敲门试探」你的服务器。没有回退站，敲门就看到代理；有了它，敲门看到的是一个真实的个人网站——证书、域名、内容三合一全是你自己的。
 
-## 施工清单（按顺序）
+**预算参考**：中转机约 ¥70-90/年起步，落地住宅机约 ¥150-250/月（按 2026-08 行情），域名约 ¥10-70/年。
 
-### 1. 采购
-- 中转机：优化线路 VPS（CN2 GIA 等），最低配即可，只跑转发
-- 落地机：**真家宽/住宅 IP** VPS（商家提供的 IP 是 ISP 类型，不是机房段）
-- 域名：任意便宜域名，托管到 Cloudflare（**灰云，仅 DNS**）
+---
 
-### 2. 两台机器加固（同一套）
+## 一、准备工作
+
+1. 密码管理器（1Password 或同类）——**本教程所有密码/密钥/Token 都要求当场存进去**
+2. SSH 工具：Windows 推荐 Termius（汉化版即可）或系统自带 PowerShell
+3. 一个账号：Cloudflare（免费计划即可）
+4. 一个域名：随便什么后缀（Spaceship / Namecheap / 阿里云万网都行），本教程以 `example.com` 代称
+
+---
+
+## 二、采购两台 VPS
+
+**在干什么**：买两台机器，一台当「快递中转站」，一台当「美国家庭住址」。
+
+| | 中转机 | 落地机 |
+|---|---|---|
+| 要什么 | 到中国的优化线路（CN2 GIA 等），配置随意最低 | **IP 必须是住宅/ISP 类型**，带宽 50-100M 足够 |
+| 不要什么 | 高配置（纯转发用不上） | 机房 IP（DMIT/搬瓦工这类只能当中转） |
+| 地区 | 美西（洛杉矶/圣何塞，离中国近） | 和中转机同城最好 |
+
+**✅ 验收**：拿到两台机器的 IP、root 密码/密钥，并且两台能互相 ping 通。落地机 IP 用 [ipdata.co](https://ipdata.co) 查，type 显示 **isp**（不是 hosting/business）才算买对。
+
+> ⚠️ 记下两个 IP，全文用 `1.2.3.4` 代指中转机、`5.6.7.8` 代指落地机。
+
+---
+
+## 三、两台机器基础加固（两台都执行）
+
+**在干什么**：改 SSH 端口、上密钥登录、装防火墙——裸奔的 VPS 上线几分钟就会被扫。
+
 ```bash
+# 两台机器都执行（先连上，再逐段粘贴）
 apt update && apt upgrade -y
 apt install -y ufw fail2ban unattended-upgrades curl socat cron
-# 时区 + NTP（Reality 对时间敏感）
-timedatectl set-timezone America/Los_Angeles   # 按落地机实际时区
-# SSH：改非标端口、密钥登录、关密码登录
-# ufw：SSH 端口 + 必要业务端口；代理端口只放中转机的 IP
+systemctl enable --now unattended-upgrades   # 自动安全更新，零打扰
 ```
 
-### 3. 证书（落地机）：acme.sh + DNS-01
-> 家宽商通常禁 80 端口（ToS），HTTP-01 走不通，**必须 DNS-01**。CF 上创建 API Token（Edit zone DNS 权限，限定本域名），Token 和 Account ID 存密码管理器。
+**改 SSH 端口**（以 23456 为例，自己换一个）：
+
 ```bash
-curl https://get.acme.sh | sh   # 需要 cron：先 apt install -y cron
-export CF_Token="***"; export CF_Account_ID="***"
+sed -i 's/#\?Port .*/Port 23456/' /etc/ssh/sshd_config
+systemctl restart ssh
+```
+
+> ⚠️ 改完**先别关当前窗口**，新开一个连接确认能进，再关旧的。同时检查 `/etc/ssh/sshd_config.d/` 下有没有覆盖文件强行开着密码登录（有的商家镜像会埋），用 `sshd -T | grep -i passwordauthentication` 看实际生效值。
+
+**防火墙**：
+
+```bash
+# 落地机（5.6.7.8）
+ufw allow 23456/tcp                                   # SSH
+ufw allow from 1.2.3.4 to any port 8444               # 只放中转机进 AnyTLS 分流口
+ufw allow from 1.2.3.4 to any port 8443               # 只放中转机进 Reality
+ufw enable
+
+# 中转机（1.2.3.4）
+ufw allow 23456/tcp
+ufw allow 443/tcp && ufw allow 8443/tcp               # 这两个对全网开放（客户端要连）
+ufw enable
+```
+
+**✅ 验收**：`ufw status` 规则齐全；新端口能 SSH 上；两台机互访正常。
+
+---
+
+## 四、域名接入 Cloudflare
+
+**在干什么**：让域名由 CF 解析，后面签证书要用它的 API。
+
+1. CF 首页 → **Onboard a domain** → 输入你的域名 → 选 Free
+2. 拿到两个 NS 地址（形如 `xxx.ns.cloudflare.com`）→ 去你的域名商后台把 DNS 服务器改成这两个
+3. CF 的 DNS 页加 3 条 A 记录，全部**灰云（仅 DNS，千万别点成橙云）**：
+   - `@` → `1.2.3.4`（中转机 IP）
+   - `www` → `1.2.3.4`
+   - `node` → `1.2.3.4`
+4. CF → My Profile → API Tokens → 用「Edit zone DNS」模板建 Token，权限范围限定本域名。**Token 和 Account ID 立刻存密码管理器**
+
+**✅ 验收**：CF 显示域名 Active；`ping node.example.com` 能解析到中转机 IP。
+
+---
+
+## 五、落地机：签真证书
+
+**在干什么**：给域名签一张 Let's Encrypt 真证书。因为家宽商一般禁止开 80 端口，所以用 DNS-01 方式（通过 CF API 证明域名是你的）。
+
+```bash
+# 📍 落地机上执行
+curl https://get.acme.sh | sh
+export CF_Token="【你的Token】"
+export CF_Account_ID="【你的Account ID】"
 ~/.acme.sh/acme.sh --issue --dns dns_cf -d node.example.com -d example.com -d www.example.com
 ~/.acme.sh/acme.sh --install-cert -d node.example.com \
-  --key-file /etc/sing-box/private.key --fullchain-file /etc/sing-box/cert.pem \
+  --key-file /etc/sing-box/private.key \
+  --fullchain-file /etc/sing-box/cert.pem \
   --reloadcmd "systemctl restart sing-box && systemctl reload nginx"
 ```
 
-### 4. 落地机三件套（sing-box + Xray + nginx）
+**✅ 验收**：看到绿色的 `Cert success`；`/etc/sing-box/cert.pem` 存在。证书会自动续期，不用管了。
 
-**sing-box（只管 AnyTLS，只听本机）** `/etc/sing-box/config.json`：
-```json
-{
-  "log": { "level": "warn" },
-  "inbounds": [ {
-    "type": "anytls", "listen": "127.0.0.1", "listen_port": 8445,
-    "users": [ { "name": "u", "password": "<32位随机密码>" } ],
-    "padding_scheme": [ "stop=9", "0=45-45", "1=120-380",
-      "2=380-560,c,480-950,c,480-950,c,480-950", "3=11-11,480-950",
-      "4=480-950", "5=480-950", "6=480-950", "7=480-950", "8=480-950" ],
-    "tls": { "enabled": true,
-      "certificate_path": "/etc/sing-box/cert.pem",
-      "key_path": "/etc/sing-box/private.key" }
-  } ],
-  "outbounds": [ { "type": "direct" } ]
-}
-```
-> `padding_scheme` 自定义填充是协议作者设计的「默认指纹逃生舱」：默认方案被识别时可换私有方案，服务端自动下发给客户端。
+---
 
-**Xray（只管 Reality）**：`bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install`，然后 `/usr/local/etc/xray/config.json`：
-```json
-{
-  "log": { "loglevel": "warning" },
-  "inbounds": [ {
-    "listen": "0.0.0.0", "port": 8443, "protocol": "vless",
-    "settings": { "clients": [ { "id": "<UUID>", "flow": "xtls-rprx-vision" } ], "decryption": "none" },
-    "streamSettings": { "network": "tcp", "security": "reality",
-      "realitySettings": {
-        "dest": "127.0.0.1:9443",
-        "serverNames": [ "example.com" ],
-        "minClientVer": "1.8.2",
-        "privateKey": "<xray x25519 生成的 PrivateKey>",
-        "shortIds": [ "<openssl rand -hex 8>" ]
-      } }
-  } ],
-  "outbounds": [ { "protocol": "freedom" } ]
-}
-```
-> 三个要点：①`dest` 指自己的回退站（「偷自己」，证书/内容全自控）②`minClientVer: "1.8.2"` 是 mihomo 客户端的兼容门票（它硬编码自报 1.8.2，Xray ≥26.7.11 默认门禁会拒）③密钥用 `xray x25519` 生成（25.8+ 输出 PQ 抗量子格式，客户端 Password 栏当公钥用；mihomo 需加 `support-x25519mlkem768: true`）
+## 六、落地机：回退站（真实网站）
 
-**nginx（分流 + 回退站）**：装 `nginx libnginx-mod-stream`，删掉默认站点（灭 80 监听）。
-`/etc/nginx/nginx.conf` 顶层加：
-```nginx
-stream {
-  map $ssl_preread_server_name $upstream {
-    node.example.com 127.0.0.1:8445;   # 你的 AnyTLS
-    default         127.0.0.1:9443;    # 其他人 → 回退站
-  }
-  server { listen 8444; proxy_pass $upstream; ssl_preread on; }
-}
+**在干什么**：放一个真实的小型个人网站。探测者敲门时看到的就是它；Reality 的伪装目标也是它。
+
+```bash
+# 📍 落地机上执行
+apt install -y nginx libnginx-mod-stream
+rm -f /etc/nginx/sites-enabled/default    # 删掉默认站点（灭 80 监听，守商家规矩）
+mkdir -p /var/www/fallback
+# 把你的静态网站文件放进 /var/www/fallback/（一个多页纯文字个人博客即可：
+# 首页 + 几篇能点进去的完整文章 + 关于页，内容和落地 IP 所在地相符更自然）
 ```
-`/etc/nginx/conf.d/fallback.conf`（回退站，也是 Reality 的 dest）：
+
+`/etc/nginx/conf.d/fallback.conf`：
+
 ```nginx
 server {
   listen 127.0.0.1:9443 ssl;
@@ -111,48 +144,232 @@ server {
   server_name example.com www.example.com;
   ssl_certificate     /etc/sing-box/cert.pem;
   ssl_certificate_key /etc/sing-box/private.key;
-  ssl_stapling on; ssl_stapling_verify on;
+  ssl_stapling on;
+  ssl_stapling_verify on;
   resolver 8.8.8.8 1.1.1.1 valid=300s;
+  resolver_timeout 5s;
   root /var/www/fallback;
   index index.html;
 }
 ```
-回退站放一个**真实内容的小型静态站**（多页个人博客最佳：文章能点进去、有微记录、有「关于」页；内容与落地 IP 所在城市/文化一致更自然）。
 
-### 5. 中转机：双路转发
+**✅ 验收**：`nginx -t` 通过，`systemctl reload nginx` 无报错。（此时网站只在本机 9443，外网还看不到，正常。）
+
+---
+
+## 七、落地机：sing-box 跑 AnyTLS
+
+**在干什么**：装 sing-box，只开 AnyTLS 一个入口，只听本机 8445（外面由 nginx 分流罩着）。
+
 ```bash
-# /etc/systemd/system/relay.service → AnyTLS 线
-ExecStart=/usr/bin/socat TCP4-LISTEN:443,fork,reuseaddr TCP4:<落地机IP>:8444
-# /etc/systemd/system/relay-reality.service → Reality 线
-ExecStart=/usr/bin/socat TCP4-LISTEN:8443,fork,reuseaddr TCP4:<落地机IP>:8443
+# 📍 落地机上执行
+curl -fsSL https://sing-box.app/install.sh | sh
 ```
 
-### 6. 客户端
-- **mihomo 系（Clash Verge Rev 等）**：AnyTLS 节点 `sni: node.example.com`（真证书，不开 skip-cert-verify）；VLESS 节点 `servername: example.com`、`flow: xtls-rprx-vision`、`client-fingerprint: chrome`、PQ 密钥时加 `support-x25519mlkem768: true`
-- **iOS Loon**：AnyTLS / VLESS+Reality 均原生支持，字段一一对应
+`/etc/sing-box/config.json` 整段写入（【密码】换成 32 位随机密码，存密码管理器）：
 
-## 当天踩的坑（最有价值的部分）
+```json
+{
+  "log": { "level": "warn" },
+  "inbounds": [ {
+    "type": "anytls",
+    "listen": "127.0.0.1",
+    "listen_port": 8445,
+    "users": [ { "name": "u", "password": "【密码】" } ],
+    "padding_scheme": [
+      "stop=9", "0=45-45", "1=120-380",
+      "2=380-560,c,480-950,c,480-950,c,480-950",
+      "3=11-11,480-950", "4=480-950", "5=480-950",
+      "6=480-950", "7=480-950", "8=480-950"
+    ],
+    "tls": { "enabled": true,
+      "certificate_path": "/etc/sing-box/cert.pem",
+      "key_path": "/etc/sing-box/private.key" }
+  } ],
+  "outbounds": [ { "type": "direct" } ]
+}
+```
 
-1. **家宽商上游封入站 443**：`ss` 显示监听但外网不通、服务端日志零连接。判据：tcpdump 抓包为 0。解法：落地 AnyTLS 挪 8444（nginx 分流口），中转机 443→8444 转发，客户端零改动
-2. **微软证书事件（2026-07 起）**：`www.microsoft.com` 更换超大证书（TLS Certificate 记录 8273 字节），Xray/sing-box 同宗的 Reality 握手重放路径处理不了，握手永不完成。日志特征：`Certificate: 8273` + `isHandshakeComplete: false` + `processed invalid connection`。**微软系 dest（含 bing）不可再用**；这就是「偷自己」成为终态的直接原因。排障工具：Xray `realitySettings` 加 `"show": true` + loglevel debug，握手解剖一目了然（查完记得调回）
-3. **Xray ≥26.7.11 的 minClientVer 门禁**：默认最低 26.3.27，mihomo 硬编码 ClientVer=1.8.2 被拒。解法：服务端显式 `minClientVer: "1.8.2"`
-4. **密钥纪律**：Reality 密钥对**只生成一次，立即进密码管理器**。多生成一次就多一副，两端贴串后症状是「配置看起来全对但认证失败」。校验工具：`xray x25519 -i <私钥>` 推导配对公钥
-5. **排障方法论**：换密钥/换版本/换指纹之前，先看握手日志；同客户端里有可用同类节点时逐项 diff 字段；「真不通」的判决要用真实流量（全局模式 + curl），延迟测试会误报
-6. **dest 套 CDN = 被偷流量**：若 Reality 的 dest 域名挂在 Cloudflare 这类开放 CDN 后面，攻击者把 SNI 填成他自己同 CDN 的域名，你的 VPS 会无鉴权地把流量转发进 CDN 回源到他的服务器——UUID/私钥/shortId 全部不需要。判一个域名是否套 CF：访问 `https://域名/cdn-cgi/trace` 有返回即中招。解法优先级：自有站（偷自己）> 未套 CDN 的直连源站 > 任何 CDN 域名。没有自有域名时的选 dest 工具链：本机跑 [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) 扫 VPS 同段邻居（注意：**务必在自己电脑上跑**，多线程扫描在 VPS 上跑可能被商家判定为网络攻击而停机），再用 [RealityChecker](https://github.com/V2RaySSR/RealityChecker) 筛掉套 CDN/不可达的，挑延迟低、TLD 正经、页面正常的。
+```bash
+sing-box check -c /etc/sing-box/config.json && systemctl enable --now sing-box
+ss -tlnp | grep 8445   # 应看到 127.0.0.1:8445 由 sing-box 监听
+```
 
-## 优化与「明确不做」
+> `padding_scheme` 是自定义流量填充方案——官方默认填充是公开指纹，换成私有一套等于换了件衣服。服务端会自动把方案下发给客户端，客户端不用配置。
 
-**做了**：自定义 padding_scheme / 真证书 + 回退站 / nginx OCSP Stapling / BBR（`net.core.default_qdisc=fq` + `net.ipv4.tcp_congestion_control=bbr`）/ unattended-upgrades 自动安全更新
+---
 
-**不做**（查过证据）：TCP Fast Open（两侧内核均有 bug issue）/ limitFallback*（官方警告是一种特征）/ sockopt 调参（默认已合理）/ 装面板（攻击面 + 默认带最新版坑）
+## 八、落地机：Xray 跑 VLESS+Reality
 
-## 验收清单
+**在干什么**：装 Xray（Reality 的亲生父母家），开 8443 入口，伪装目标指向自己的回退站（「偷自己」）。
 
-- [ ] 客户端两节点延迟均绿，出口 IP 显示为落地机住宅 IP（两节点同 IP）
-- [ ] 浏览器开 `https://你的域名` → 回退站正常，无证书警告
-- [ ] DNS / WebRTC 泄露测试无真实 IP
-- [ ] 目标服务（AI 站点等）实测无验证码、无降智
-- [ ] 服务端日志级别调回 warning、show 关闭、临时测试进程与端口清理完毕
+```bash
+# 📍 落地机上执行
+bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+xray x25519     # 生成密钥对：PrivateKey / Password / Hash32 三栏
+openssl rand -hex 8   # 生成 short_id
+```
+
+> 🔑 **铁律：密钥只生成这一次，立刻把 PrivateKey 和 Password 两栏存进密码管理器。** UUID 也用密码管理器生成一个（或 `cat /proc/sys/kernel/random/uuid`）。
+
+`/usr/local/etc/xray/config.json`：
+
+```json
+{
+  "log": { "loglevel": "warning" },
+  "inbounds": [ {
+    "listen": "0.0.0.0", "port": 8443, "protocol": "vless",
+    "settings": {
+      "clients": [ { "id": "【UUID】", "flow": "xtls-rprx-vision" } ],
+      "decryption": "none"
+    },
+    "streamSettings": {
+      "network": "tcp", "security": "reality",
+      "realitySettings": {
+        "dest": "127.0.0.1:9443",
+        "serverNames": [ "example.com" ],
+        "minClientVer": "1.8.2",
+        "privateKey": "【PrivateKey】",
+        "shortIds": [ "【short_id】" ]
+      }
+    }
+  } ],
+  "outbounds": [ { "protocol": "freedom" } ]
+}
+```
+
+```bash
+/usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json && systemctl enable --now xray
+ss -tlnp | grep 8443
+```
+
+> 字段说明：`dest` 指自己的回退站 = 伪装零借用痕迹；`minClientVer: "1.8.2"` 是给 mihomo 客户端的兼容门票（它自报版本硬编码 1.8.2，新版 Xray 默认门禁会拦）；`xray x25519`（25.8+）生成的是抗量子密钥，Password 栏就是客户端要填的「公钥」。
+
+---
+
+## 九、落地机：nginx SNI 分流
+
+**在干什么**：8444 端口站岗分流——报出 `node.example.com` 的连接送去 AnyTLS，其他（探测者）送去回退站。
+
+`/etc/nginx/nginx.conf` **顶层**（和 `http {}` 平级）追加：
+
+```nginx
+stream {
+  map $ssl_preread_server_name $upstream {
+    node.example.com 127.0.0.1:8445;
+    default          127.0.0.1:9443;
+  }
+  server {
+    listen 8444;
+    proxy_pass $upstream;
+    ssl_preread on;
+  }
+}
+```
+
+```bash
+nginx -t && systemctl restart nginx
+ss -tlnp | grep -E '8444|8445|9443'
+# 验收：8444=nginx（对网），8445=sing-box 与 9443=nginx 都只在本机，没有 80 端口
+```
+
+---
+
+## 十、中转机：双路转发
+
+**在干什么**：中转机只当搬运工，两个端口分别转两条线。
+
+```bash
+# 📍 中转机上执行，整段复制
+cat > /etc/systemd/system/relay.service << 'EOF'
+[Unit]
+Description=relay to landing (AnyTLS)
+After=network.target
+[Service]
+ExecStart=/usr/bin/socat TCP4-LISTEN:443,fork,reuseaddr TCP4:5.6.7.8:8444
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+
+cat > /etc/systemd/system/relay-reality.service << 'EOF'
+[Unit]
+Description=relay to landing (Reality)
+After=network.target
+[Service]
+ExecStart=/usr/bin/socat TCP4-LISTEN:8443,fork,reuseaddr TCP4:5.6.7.8:8443
+Restart=always
+RestartSec=3
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl enable --now relay relay-reality
+systemctl status relay relay-reality --no-pager | grep Active   # 两个都 active
+```
+
+---
+
+## 十一、客户端配置
+
+### mihomo 系（Clash Verge Rev 等，YAML 片段）
+
+```yaml
+proxies:
+  - name: "家宽-AnyTLS"
+    type: anytls
+    server: 1.2.3.4          # 中转机 IP
+    port: 443
+    password: "【密码】"
+    sni: node.example.com    # 真证书，不写 skip-cert-verify
+    udp: true
+  - name: "家宽-Reality"
+    type: vless
+    server: 1.2.3.4
+    port: 8443
+    uuid: "【UUID】"
+    flow: xtls-rprx-vision
+    tls: true
+    servername: example.com
+    client-fingerprint: chrome
+    reality-opts:
+      public-key: "【Password栏】"
+      short-id: "【short_id】"
+      support-x25519mlkem768: true   # 抗量子密钥时加；经典密钥则删
+    udp: true
+```
+
+### iOS Loon（`[Proxy]` 段）
+
+```ini
+家宽-AnyTLS = AnyTLS, 1.2.3.4, 443, "【密码】", sni=node.example.com, skip-cert-verify=false, udp=true, block-quic=false
+家宽-Reality = VLESS, 1.2.3.4, 8443, "【UUID】", transport=tcp, flow=xtls-rprx-vision, public-key="【Password栏】", short-id=【short_id】, over-tls=true, sni=example.com, udp=true
+```
+
+**✅ 总验收**：
+1. 两节点延迟测试均绿
+2. 浏览器开 `https://example.com` → 你的回退站正常、无证书警告
+3. [ipdata.co](https://ipdata.co) 显示落地机住宅 IP（两节点同一个）
+4. [browserleaks.com/dns](https://browserleaks.com/dns) 无真实 IP 泄露
+5. 目标服务（如 AI 站点）实测无验证码、无降智
+
+---
+
+## 十二、踩坑实录（本教程最值钱的部分）
+
+1. **家宽商上游可能封入站 443**：`ss` 显示监听但外网不通、服务端日志零连接。判据：`tcpdump` 抓包为 0。这就是本教程 AnyTLS 落地用 8444（nginx 分流口）的原因——中转机 443 照开，客户端无感
+2. **微软证书事件（2026-07 起）**：`www.microsoft.com` 更换超大证书（TLS Certificate 记录 8273 字节），Reality 握手重放路径处理不了，握手永不完成（日志特征：`Certificate: 8273` + `isHandshakeComplete: false`）。**微软系 dest（含 bing）不可再用**；排障神器：Xray 的 `realitySettings` 加 `"show": true` + 日志调 debug，握手解剖一目了然（查完调回 warning）
+3. **Xray ≥26.7.11 的 minClientVer 门禁**：默认最低 26.3.27，mihomo 硬编码自报 1.8.2 会被拦在认证阶段。解法：服务端显式 `minClientVer: "1.8.2"`（本教程配置已含）
+4. **密钥纪律**：多生成一次密钥就多一副，两端贴串后症状是「配置看起来全对但认证失败」。校验：`xray x25519 -i <私钥>` 推导配对公钥比对
+5. **排障方法论**：换密钥/换版本/换指纹之前先看握手日志；同客户端有可用同类节点时逐项 diff 字段；「真不通」要用真实流量判（全局模式 + curl），延迟测试会误报
+6. **dest 套 CDN = 被偷流量**：dest 域名挂 Cloudflare 这类开放 CDN 时，攻击者用自己的同 CDN 域名做 SNI 即可无鉴权借你的 VPS 回源。判一个域名是否套 CF：访问 `https://域名/cdn-cgi/trace` 有返回即中招。优先级：自有站 > 未套 CDN 的直连站 > CDN 域名。没有自有域名时选 dest 的工具：本机跑 [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) 扫同段邻居（**别在 VPS 上跑**，多线程扫描可能被商家判定攻击而停机）+ [RealityChecker](https://github.com/V2RaySSR/RealityChecker) 筛掉套 CDN/不可达的
+
+## 十三、优化与「明确不做」
+
+**建议做**：自定义 padding_scheme（已在配置里）/ 真证书 + 回退站 / OCSP Stapling / BBR（`net.core.default_qdisc=fq` + `net.ipv4.tcp_congestion_control=bbr` 写入 `/etc/sysctl.d/99-bbr.conf` 后 `sysctl --system`）/ unattended-upgrades
+
+**明确不做**（都查过证据）：TCP Fast Open（两侧内核均有 bug issue）/ `limitFallback*`（官方警告是一种特征）/ sockopt 调参（默认已合理）/ 装 Web 面板（攻击面 + 面板默认装最新版内核踩门禁）
 
 ---
 
@@ -160,7 +377,7 @@ ExecStart=/usr/bin/socat TCP4-LISTEN:8443,fork,reuseaddr TCP4:<落地机IP>:8443
 
 ## 致谢与参考
 
-本教程站在这两篇文章、这些社区讨论和这些文档的肩膀上，特此致谢 🙏
+本教程站在这些文章、讨论和文档的肩膀上，特此致谢 🙏
 
 **架构参考**
 - [LINUX DO：小丸子《自建家宽节点+中转站教程》](https://linux.do/t/topic/2086346)——中转+落地架构的原型参考
@@ -173,10 +390,10 @@ ExecStart=/usr/bin/socat TCP4-LISTEN:8443,fork,reuseaddr TCP4:<落地机IP>:8443
 - [Xray/mihomo Reality 配置教程（argsment）](https://core-tutorial.argsment.com/zh/xray/reality)
 
 **关键社区病例**
-- [LINUX DO：3x-ui Reality 节点 timeout——Microsoft 伪装站证书过大事件](https://linux.do/t/topic/2571392)（本教程「坑 2」的同案首发记录，感谢楼主抓出 8273 字节这个关键证据）
-- [LINUX DO：搬瓦工 IP 一月被墙两次求助帖](https://linux.do/t/topic/2757894)（dest 选型的集体智慧：勿用谷歌系/CF 套壳域名，「偷自己」多人多年实证）
-- [LINUX DO：x-ui Reality 在 Shadowrocket 正常、Clash 系全灭](https://linux.do/t/topic/2692871)（minClientVer 门禁的实战记录）
-- [LINUX DO：小心自己搭建的 VPS 被别人偷流量 + Reality 伪装域名选择教程](https://linux.do/t/topic/2736045)（CDN dest 偷流量机制 + RealiTLScanner/RealityChecker 工具链）
+- [LINUX DO：3x-ui Reality 节点 timeout——Microsoft 伪装站证书过大事件](https://linux.do/t/topic/2571392)（「坑 2」的同案首发记录，感谢楼主抓出 8273 字节这个关键证据）
+- [LINUX DO：搬瓦工 IP 一月被墙两次求助帖](https://linux.do/t/topic/2757894)（dest 选型集体智慧：勿用谷歌系/CF 套壳域名，「偷自己」多人多年实证）
+- [LINUX DO：x-ui Reality 在 Shadowrocket 正常、Clash 系全灭](https://linux.do/t/topic/2692871)（minClientVer 门禁实战记录）
+- [LINUX DO：小心自己搭建的 VPS 被别人偷流量 + Reality 伪装域名选择教程](https://linux.do/t/topic/2736045)（「坑 6」的机制与工具链）
 - [idcflare：高位端口批判](https://idcflare.com/t/topic/76439)（端口与伪装的讨论）
 - [V2EX：近日 AnyTLS 流量已被识别或通报](https://www.v2ex.com/t/1214944)（2026-05 指纹识别事件）
 
@@ -184,4 +401,3 @@ ExecStart=/usr/bin/socat TCP4-LISTEN:8443,fork,reuseaddr TCP4:<落地机IP>:8443
 - [mihomo#2967](https://github.com/MetaCubeX/mihomo/issues/2967)（ClientVer 硬编码与 wontfix）/ [mihomo#3042](https://github.com/MetaCubeX/mihomo/issues/3042) / [Xray-core#6477](https://github.com/XTLS/Xray-core/issues/6477)（版本兼容事件三方视角）
 - [Xray-core Discussions #2256](https://github.com/XTLS/Xray-core/discussions/2256)（RPRX 本人的 dest 选型指导）/ [#2308](https://github.com/XTLS/Xray-core/discussions/2308)（dest 密钥曲线导致握手失败）
 - [sing-box#4023](https://github.com/SagerNet/sing-box/issues/4023)（sing-box Reality 服务端兼容性病例）
-
