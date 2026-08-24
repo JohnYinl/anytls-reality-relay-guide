@@ -138,6 +138,7 @@ ExecStart=/usr/bin/socat TCP4-LISTEN:8443,fork,reuseaddr TCP4:<落地机IP>:8443
 3. **Xray ≥26.7.11 的 minClientVer 门禁**：默认最低 26.3.27，mihomo 硬编码 ClientVer=1.8.2 被拒。解法：服务端显式 `minClientVer: "1.8.2"`
 4. **密钥纪律**：Reality 密钥对**只生成一次，立即进密码管理器**。多生成一次就多一副，两端贴串后症状是「配置看起来全对但认证失败」。校验工具：`xray x25519 -i <私钥>` 推导配对公钥
 5. **排障方法论**：换密钥/换版本/换指纹之前，先看握手日志；同客户端里有可用同类节点时逐项 diff 字段；「真不通」的判决要用真实流量（全局模式 + curl），延迟测试会误报
+6. **dest 套 CDN = 被偷流量**：若 Reality 的 dest 域名挂在 Cloudflare 这类开放 CDN 后面，攻击者把 SNI 填成他自己同 CDN 的域名，你的 VPS 会无鉴权地把流量转发进 CDN 回源到他的服务器——UUID/私钥/shortId 全部不需要。判一个域名是否套 CF：访问 `https://域名/cdn-cgi/trace` 有返回即中招。解法优先级：自有站（偷自己）> 未套 CDN 的直连源站 > 任何 CDN 域名。没有自有域名时的选 dest 工具链：本机跑 [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) 扫 VPS 同段邻居（注意：**务必在自己电脑上跑**，多线程扫描在 VPS 上跑可能被商家判定为网络攻击而停机），再用 [RealityChecker](https://github.com/V2RaySSR/RealityChecker) 筛掉套 CDN/不可达的，挑延迟低、TLD 正经、页面正常的。
 
 ## 优化与「明确不做」
 
@@ -175,6 +176,7 @@ ExecStart=/usr/bin/socat TCP4-LISTEN:8443,fork,reuseaddr TCP4:<落地机IP>:8443
 - [LINUX DO：3x-ui Reality 节点 timeout——Microsoft 伪装站证书过大事件](https://linux.do/t/topic/2571392)（本教程「坑 2」的同案首发记录，感谢楼主抓出 8273 字节这个关键证据）
 - [LINUX DO：搬瓦工 IP 一月被墙两次求助帖](https://linux.do/t/topic/2757894)（dest 选型的集体智慧：勿用谷歌系/CF 套壳域名，「偷自己」多人多年实证）
 - [LINUX DO：x-ui Reality 在 Shadowrocket 正常、Clash 系全灭](https://linux.do/t/topic/2692871)（minClientVer 门禁的实战记录）
+- [LINUX DO：小心自己搭建的 VPS 被别人偷流量 + Reality 伪装域名选择教程](https://linux.do/t/topic/2736045)（CDN dest 偷流量机制 + RealiTLScanner/RealityChecker 工具链）
 - [idcflare：高位端口批判](https://idcflare.com/t/topic/76439)（端口与伪装的讨论）
 - [V2EX：近日 AnyTLS 流量已被识别或通报](https://www.v2ex.com/t/1214944)（2026-05 指纹识别事件）
 
