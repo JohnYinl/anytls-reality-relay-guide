@@ -56,6 +56,34 @@
 apt update && apt upgrade -y
 apt install -y ufw fail2ban unattended-upgrades curl socat cron
 systemctl enable --now unattended-upgrades   # 自动安全更新，零打扰
+timedatectl set-ntp true                     # 时间同步：协议握手对时间敏感，误差超约 90 秒会「配置全对但连不上」
+```
+
+**✅ 时间验收**：`timedatectl` 输出里 `System clock synchronized: yes`。
+
+**上密钥登录**（先在你自己的电脑上生成钥匙，再装到服务器）：
+
+```bash
+# ① 你自己的电脑：Windows 用 PowerShell、Mac 用终端，都一样
+ssh-keygen -t ed25519
+# 一路回车。生成两个文件：id_ed25519（私钥，像家门钥匙，谁都不能给、不用上传）
+# 和 id_ed25519.pub（公钥，像锁芯，装到服务器上）
+# 用 Termius 的话更简单：设置 → 密钥链（Keychain）里新建密钥，它会替你生成
+```
+
+```bash
+# ② 服务器上（两台都执行）：把公钥装进去
+mkdir -p ~/.ssh && chmod 700 ~/.ssh
+nano ~/.ssh/authorized_keys   # 把 id_ed25519.pub 的整行内容粘进去，保存退出
+chmod 600 ~/.ssh/authorized_keys
+```
+
+**✅ 验收**：新开一个连接，用密钥登录（Termius 主机里选「用密钥」、PowerShell 直接 `ssh` 默认就会用）——不问密码就进去了 = 钥匙生效。**确认能进之后再做下一步**，别把自己锁在门外。
+
+```bash
+# ③ 确认密钥能进之后：关掉密码登录（两台都执行）
+sed -i 's/#\?PasswordAuthentication .*/PasswordAuthentication no/' /etc/ssh/sshd_config
+systemctl restart ssh
 ```
 
 **改 SSH 端口**（以 23456 为例，自己换一个）：
@@ -112,6 +140,7 @@ curl https://get.acme.sh | sh
 export CF_Token="【你的Token】"
 export CF_Account_ID="【你的Account ID】"
 ~/.acme.sh/acme.sh --issue --dns dns_cf -d node.example.com -d example.com -d www.example.com
+mkdir -p /etc/sing-box        # 必须的：install-cert 不会自己建目录，没有这一步会报错
 ~/.acme.sh/acme.sh --install-cert -d node.example.com \
   --key-file /etc/sing-box/private.key \
   --fullchain-file /etc/sing-box/cert.pem \
@@ -171,6 +200,7 @@ curl -fsSL https://sing-box.app/install.sh | sh
 ```json
 {
   "log": { "level": "warn" },
+  "dns": { "strategy": "ipv4_only" },
   "inbounds": [ {
     "type": "anytls",
     "listen": "127.0.0.1",
@@ -196,6 +226,7 @@ ss -tlnp | grep 8445   # 应看到 127.0.0.1:8445 由 sing-box 监听
 ```
 
 > `padding_scheme` 是自定义流量填充方案——官方默认填充是公开指纹，换成私有一套等于换了件衣服。服务端会自动把方案下发给客户端，客户端不用配置。
+> `dns.strategy: ipv4_only` 是出站锁 IPv4——双栈机器的 IPv6 路由常常是半残的（有地址出不去），每个连接都先试 v6 白等约 200ms 再回退 v4。锁死后每个连接都省这笔「黑洞税」，实测首字节延迟可追平同链路专线隧道。原理见「踩坑实录」坑 7。
 
 ---
 
@@ -234,7 +265,7 @@ openssl rand -hex 8   # 生成 short_id
       }
     }
   } ],
-  "outbounds": [ { "protocol": "freedom" } ]
+  "outbounds": [ { "protocol": "freedom", "settings": { "domainStrategy": "UseIPv4" } } ]
 }
 ```
 
@@ -243,7 +274,7 @@ openssl rand -hex 8   # 生成 short_id
 ss -tlnp | grep 8443
 ```
 
-> 字段说明：`dest` 指自己的回退站 = 伪装零借用痕迹；`minClientVer: "1.8.2"` 是给 mihomo 客户端的兼容门票（它自报版本硬编码 1.8.2，新版 Xray 默认门禁会拦）；`xray x25519`（25.8+）生成的是抗量子密钥，Password 栏就是客户端要填的「公钥」。
+> 字段说明：`dest` 指自己的回退站 = 伪装零借用痕迹；`minClientVer: "1.8.2"` 是给 mihomo 客户端的兼容门票（它自报版本硬编码 1.8.2，新版 Xray 默认门禁会拦）；`xray x25519`（25.8+）生成的是抗量子密钥，Password 栏就是客户端要填的「公钥」；freedom 出站的 `domainStrategy: "UseIPv4"` 是出站锁 IPv4，避免双栈机器的 IPv6 黑洞税（见坑 7）。
 
 ---
 
@@ -364,6 +395,7 @@ proxies:
 4. **密钥纪律**：多生成一次密钥就多一副，两端贴串后症状是「配置看起来全对但认证失败」。校验：`xray x25519 -i <私钥>` 推导配对公钥比对
 5. **排障方法论**：换密钥/换版本/换指纹之前先看握手日志；同客户端有可用同类节点时逐项 diff 字段；「真不通」要用真实流量判（全局模式 + curl），延迟测试会误报
 6. **dest 套 CDN = 被偷流量**：dest 域名挂 Cloudflare 这类开放 CDN 时，攻击者用自己的同 CDN 域名做 SNI 即可无鉴权借你的 VPS 回源。判一个域名是否套 CF：访问 `https://域名/cdn-cgi/trace` 有返回即中招。优先级：自有站 > 未套 CDN 的直连站 > CDN 域名。没有自有域名时选 dest 的工具：本机跑 [RealiTLScanner](https://github.com/XTLS/RealiTLScanner) 扫同段邻居（**别在 VPS 上跑**，多线程扫描可能被商家判定攻击而停机）+ [RealityChecker](https://github.com/V2RaySSR/RealityChecker) 筛掉套 CDN/不可达的
+7. **双栈 VPS 的「IPv6 黑洞税」：每个连接白等约 200ms**：症状很阴——ping 正常、节点测试全绿，但开网页总慢半拍，`curl` 的 `time_connect` 固定 200ms 上下。根因：落地机同时有 IPv4 和 IPv6 地址，但商家的 v6 路由是半残的（有地址、出不去）；系统 Happy Eyeballs 机制每个连接都先试 v6、等约 200ms 超时才回退 v4，**每个连接都被罚一次**。**判据**：`curl -4` 与 `curl -6` 分别测同一双栈网址对比 `time_connect`；`ip -6 addr show scope global` 能看到 v6 地址。修法就是本教程配置里已内置的出站锁 IPv4（sing-box `dns.strategy: ipv4_only`，1.12+ 写法，旧的 outbound `domain_strategy` 已废弃、写了会拒启动；Xray freedom 出站 `domainStrategy: "UseIPv4"`）。实测 Reality 线首字节从明显落后到追平同链路专线隧道（约 300 vs 264ms）。老配置没锁的，补上这两行重启服务即可
 
 ## 十三、优化与「明确不做」
 
